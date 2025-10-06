@@ -1,0 +1,369 @@
+
+#include<stdlib.h>
+#include<stdio.h>
+#include<string.h>
+#include<errno.h>
+#include<unistd.h>
+#include<sys/types.h>
+#include<sys/socket.h>
+#include<sys/un.h>
+#include<arpa/inet.h>
+#include<netdb.h>
+#include<netinet/in.h>
+#include <signal.h>
+#include <ctype.h> 
+#include <locale.h>
+
+#define MAX_LINE 2048
+in_addr_t my_inet_addr(char* host) {
+	in_addr_t		inaddr;
+	struct hostent* hp;
+
+	inaddr = inet_addr(host);
+	if (inaddr == INADDR_NONE && (hp = gethostbyname(host)) != NULL)
+		bcopy(hp->h_addr, (char*)&inaddr, hp->h_length);
+	return inaddr;
+}
+
+int tcp_open_server(char* port) {
+	int			sockfd;
+	struct sockaddr_in	serv_addr;
+
+	/* Open a TCP socket (an Internet stream socket). */
+	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) return -1;
+
+	/* Bind our local address so that the client can send to us. */
+	bzero((char*)&serv_addr, sizeof(serv_addr));
+	serv_addr.sin_family = AF_INET;
+	serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	serv_addr.sin_port = htons(atoi(port));
+
+	if (bind(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
+		return -1;
+	listen(sockfd, 5);
+	return sockfd;
+}
+
+
+int tcp_open_client(char* host, int* port) {
+	int			sockfd;
+	struct sockaddr_in	serv_addr;
+
+	bzero((char*)&serv_addr, sizeof(serv_addr));
+	serv_addr.sin_family = AF_INET;
+	serv_addr.sin_addr.s_addr = my_inet_addr(host);
+	serv_addr.sin_port = htons(*port);
+
+	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0
+		|| connect(sockfd, (struct sockaddr*)&serv_addr,
+			sizeof(serv_addr)) < 0)
+		return -1;
+	return sockfd;
+}
+
+
+int hextodec(char hex) {
+	if (hex >= '0' && hex <= '9') {
+		return hex - '0';
+	}
+	else if (hex >= 'a' && hex <= 'f') {
+		return hex - 'a' + 10;
+	}
+	else if (hex >= 'A' && hex <= 'F') {
+		return hex - 'A' + 10;
+	}
+	else {
+		printf("error while hextodec");
+		return -1;
+	}
+}
+
+char* urlDecode(char* str) {
+	char* decodedStr = (char*)malloc(strlen(str) + 1);
+	int i = 0;
+	for (int j = 0; str[j] != '\0'; j++) {
+		if (str[j] == '%' && isxdigit(str[j + 1]) && isxdigit(str[j + 2])) {
+			int digit1 = hextodec(str[j + 1]);
+			int digit2 = hextodec(str[j + 2]);
+
+			if (digit1 != -1 && digit2 != -1) {
+				decodedStr[i++] = (char)(16 * digit1 + digit2);
+				j += 2;
+			}
+			else {
+				decodedStr[i++] = str[j];
+			}
+		}
+		else {
+			decodedStr[i++] = str[j];
+		}
+	}
+
+	decodedStr[i] = '\0';
+
+
+	return decodedStr;
+}
+int readready(int fd) {
+	fd_set		map;
+	int		ret;
+	struct timeval	_zerotimeval = { 0, 0 };
+
+	do {
+		FD_ZERO(&map); FD_SET(fd, &map);
+		ret = select(fd + 1, &map, NULL, NULL, &_zerotimeval);
+		if (ret >= 0) return ret;
+	} while (errno == EINTR);
+	return ret;
+}
+int readline(int fd, char* ptr, int maxlen) {
+	int	n, rc;
+	char	c;
+
+	for (n = 1; n < maxlen; n++) {
+		if ((rc = read(fd, &c, 1)) == 1) {
+			*ptr++ = c;
+			if (c == '\n') break;
+		}
+		else if (rc == 0) {
+			if (n == 1) return (0);	/* EOF, no data read	*/
+			else break;		/* EOF, some data read	*/
+		}
+		else return (-1);		/* Error		*/
+	}
+	*ptr = 0;
+	return (n);
+}
+
+
+
+
+
+
+int webgetandoutput(char* url, int newsockfd) {
+	int sockfd, len, ret;
+	char protocol[6] = "";
+	int port = 65536;
+	char host[MAX_LINE], path[MAX_LINE], buf[MAX_LINE];
+
+
+
+
+	// parseURL(url, protocol, host, &port, path);
+
+
+	 //start parse
+
+	const char* protocolEnd = strstr(url, "://");
+	if (protocolEnd != NULL) {
+		strncpy(protocol, url, protocolEnd - url);
+		protocol[protocolEnd - url] = '\0';
+
+		// save hostname
+		const char* hostStart = protocolEnd + 3;
+		const char* hostEnd = strchr(hostStart, '/');
+		if (hostEnd != NULL) {
+			const char* portStart = strchr(hostStart, ':');
+			if (portStart != NULL && portStart < hostEnd) {
+
+				strncpy(host, hostStart, portStart - hostStart);
+				host[portStart - hostStart] = '\0';
+
+				sscanf(portStart + 1, "%d", &port);
+			}
+			else {
+
+				strncpy(host, hostStart, hostEnd - hostStart);
+				host[hostEnd - hostStart] = '\0';
+			}
+
+			// save path
+			const char* pathStart = hostEnd;
+			strcpy(path, pathStart);
+		}
+		else {
+
+			//save hostname
+			strcpy(host, hostStart);
+
+			// if URL not cotain path,use "/"
+			strcpy(path, "/");
+		}
+
+		// if URL not cotain port no., use defalut port
+		if (port == 65536) {
+			if (protocol[4] == 's') {
+				port = 443;
+			}
+			else {
+				port = 80;
+			}
+		}
+	}
+	else {
+		printf("error while url parse\n");
+	}
+
+
+
+	//end parse
+
+
+
+
+
+
+
+
+
+	sockfd = tcp_open_client(host, &port);
+	if (sockfd < 0) {
+		printf("error while connect to the server\n");
+		return -1;
+	}
+	strncpy(buf, "GET ", MAX_LINE);
+	strncat(buf, path, MAX_LINE - strlen(buf) - 1);
+	strncat(buf, " HTTP/1.1\r\nHost: ", MAX_LINE - strlen(buf) - 1);
+	strncat(buf, host, MAX_LINE - strlen(buf) - 1);
+	strncat(buf, "\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0\r\nConnection: keep-alive\r\n\r\n", MAX_LINE - strlen(buf) - 1);
+	len = strlen(buf);
+	if (write(sockfd, buf, len) != len) {
+		printf("error while send request\n");
+		close(sockfd);
+		return -1;
+	}
+	int dtby = 0;//網站輸出 body 標籤那一行後，變成1
+
+	while (1) {
+		if ((ret = readready(sockfd)) < 0) {
+			break;
+		}
+		if (ret > 0) {
+			if (readline(sockfd, buf, MAX_LINE) <= 0) {
+				//printf("Concatenated String: %s\n", a);
+
+				break;
+			}
+			// fputs(buf, stdout);
+			//strcat(a, buf);
+
+
+
+			send(newsockfd, buf, strlen(buf), 0);
+
+			if (dtby == 0) {
+				if (strstr(buf, "<body") != NULL) {
+					char ad[] = "<script>alert('您本期電訊費未繳納，請到種花電信營業點或線上繳款！\\n查詢：0800-0000-0000');</script>";
+					send(newsockfd, ad, strlen(ad), 0);
+					dtby = 1;
+				}
+			}
+
+		}
+
+	}
+
+	close(sockfd);
+	return 0;
+}
+
+
+
+
+void do_main(int newsockfd) {
+	int		ret;
+	char		buf[MAX_LINE];
+
+	while ((ret = readready(newsockfd)) >= 0) {
+		if (ret == 0) continue;
+		if (readline(newsockfd, buf, MAX_LINE) <= 0) break;
+		fputs(buf, stdout);
+		if (buf[0] == '@') {
+			int		len;
+
+			len = strlen(buf);
+			send(newsockfd, buf + 1, len - 1, 0);
+		}
+		else if (strncmp(buf, "QUIT", 4) == 0) {
+			kill(getppid(), SIGKILL);
+			break;
+		}
+		else if (strncmp(buf, "GET ", 4) == 0) {
+			char	bufskip[MAX_LINE];
+
+
+			//aaaaaaa
+			char abc[256];
+
+			// find "abc=" 
+			char* abc_start = strstr(buf, "abc=");
+
+			if (abc_start != NULL) {
+				abc_start += 4;
+
+				// find ' 'or'&' 
+				char* abc_end = strpbrk(abc_start, " &");
+
+				if (abc_end != NULL) {
+					size_t length = abc_end - abc_start;
+					strncpy(abc, abc_start, length);
+					abc[length] = '\0'; // add \0 to the end
+				}
+				else {
+					// if not find  ' 'or'&' , copy all line (it should not happen)
+					strcpy(abc, abc_start);
+				}
+
+				char* decodedabc = urlDecode(abc);
+				webgetandoutput(decodedabc, newsockfd);
+
+
+			}
+			else {
+				char* msg =
+					"HTTP/1.0 200 OK\r\n"
+					"Content-Type: text/html\r\n"
+					"\r\n <html><body><form action='' method='get'><input  name='abc' required><br><input type='submit' value='Submit'/></body></html>\n";
+				while (readline(newsockfd, bufskip, MAX_LINE))
+					if (strncmp(bufskip, "\r\n", 2) == 0) break;
+				send(newsockfd, msg, strlen(msg), 0);////
+				//send (newsockfd, buf, strlen(buf), 0);//abc
+			}
+
+
+
+
+
+
+
+			break;
+		}
+	}
+}
+
+int main(int argc, char* argv[]) {
+
+	setlocale(LC_ALL, "zh_TW.UTF-8");
+
+	int			sockfd, newsockfd, clilen, childpid;
+	struct sockaddr_in	cli_addr;
+
+	sockfd = tcp_open_server(argv[1]);
+
+	for (; ; ) {
+		/* Wait for a connection from a client process. (Concurrent Server)*/
+		clilen = sizeof(cli_addr);
+		newsockfd = accept(sockfd, (struct sockaddr*)&cli_addr, &clilen);
+		if (newsockfd < 0) exit(1); /* server: accept error */
+		if ((childpid = fork()) < 0) exit(1); /* server: fork error */
+
+		if (childpid == 0) {		/* child process	*/
+			close(sockfd);		/* close original socket*/
+			do_main(newsockfd);	/* process the request	*/
+			exit(0);
+		}
+
+		close(newsockfd);		/* parent process	*/
+	}
+}
+
